@@ -6,9 +6,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-###############################
-# Streamlit page config + CSS #
-###############################
+############################################
+# Streamlit page config + minimal dark CSS #
+############################################
 
 st.set_page_config(
     page_title="S&S KPI Dashboard",
@@ -16,150 +16,129 @@ st.set_page_config(
     page_icon="💈",
 )
 
-# -- Inject a tiny bit of CSS for modern card look
+###############################
+# 0. Utility – local CSS for cards
+###############################
+
 st.markdown(
     """
     <style>
-        .big-metric {
-            font-size: 2.8rem !important;
-            font-weight: 700;
-            margin: 0;
-        }
-        .metric-delta {
-            font-size: 1.2rem !important;
-        }
-        .kpi-card {
-            background: #1e1e24;
-            padding: 1rem 1.2rem;
-            border-radius: 12px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-        }
-        .kpi-title {
-            color: #8b949e;
-            font-size: .9rem;
-            margin-bottom: .3rem;
-        }
-        .sparkline-container svg {
-            width: 100% !important;
-        }
+        .kpi-card {background:#1e1e24;padding:1rem 1.2rem;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,0.45);}
+        .kpi-title {color:#8b949e;font-size:.8rem;margin-bottom:.3rem;letter-spacing:.5px;text-transform:uppercase;}
+        .kpi-val {font-size:2.2rem;font-weight:700;margin:0;}
+        .kpi-delta {font-size:1rem;}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 ###############################
-# 1. Load data               #
+# 1. Load & cache data        #
 ###############################
 
 @st.cache_data(show_spinner=False, ttl=1800)
-def load_csv(path: str | Path = "shop_kpi_dashboard_full.csv") -> pd.DataFrame:
+def load_data(path: str | Path = "shop_kpi_dashboard_full.csv") -> pd.DataFrame:
     df = pd.read_csv(path)
     df["Date"] = pd.to_datetime(df["Date"]).dt.date
     return df
 
 data_path = Path("shop_kpi_dashboard_full.csv")
 if not data_path.exists():
-    st.error("❌  shop_kpi_dashboard_full.csv not found in repo root.")
+    st.error("🔴  CSV missing – upload shop_kpi_dashboard_full.csv to repo root.")
     st.stop()
 
-raw_df = load_csv(data_path)
+df_raw = load_data(data_path)
 
 ###############################
-# 2. Sidebar filters          #
+# 2. Sidebar controls         #
 ###############################
 
-st.sidebar.header("🔍  Filters")
-all_shops = sorted(raw_df["Shop"].unique())
-shop_sel = st.sidebar.multiselect("Shop(s)", all_shops, default=all_shops)
+st.sidebar.header("🎚️  Controls")
+shop_options = sorted(df_raw["Shop"].unique())
+shops_sel = st.sidebar.multiselect("Shop(s)", shop_options, default=shop_options)
 
-all_kpis = sorted(raw_df["KPI"].unique())
+all_kpis = sorted(df_raw["KPI"].unique())
 primary_kpi = st.sidebar.selectbox("Primary KPI", all_kpis, index=all_kpis.index("net_revenue"))
 
-min_dt, max_dt = raw_df["Date"].min(), raw_df["Date"].max()
+compare_kpis = st.sidebar.multiselect(
+    "Overlay KPI(s)",
+    options=[k for k in all_kpis if k != primary_kpi],
+)
+
+min_date, max_date = df_raw["Date"].min(), df_raw["Date"].max()
 start_dt, end_dt = st.sidebar.slider(
     "Date range",
-    min_value=min_dt,
-    max_value=max_dt,
-    value=(min_dt, max_dt),
+    min_value=min_date,
+    max_value=max_date,
+    value=(min_date, max_date),
     step=datetime.timedelta(days=31),
     format="MMM YYYY",
 )
 
-promo_toggle = st.sidebar.checkbox("Show Men’s Grooming Month band (Aug 2023)")
 agg_method = st.sidebar.radio("Aggregation", ["Average", "Sum"], horizontal=True)
 agg_func = np.mean if agg_method == "Average" else np.sum
+normalize_toggle = st.sidebar.checkbox("Normalize overlay lines (index = 100)")
+
+promo_toggle = st.sidebar.checkbox("Show Men’s Grooming Month (Aug 2023)")
 
 ###############################
-# 3. Filter df                #
+# 3. Filter dataframe         #
 ###############################
 
-flt_df = raw_df[
-    (raw_df["Shop"].isin(shop_sel))
-    & raw_df["Date"].between(start_dt, end_dt)
-].copy()
-
-if flt_df.empty:
-    st.warning("No data for selection.")
+filt = df_raw[(df_raw["Shop"].isin(shops_sel)) & df_raw["Date"].between(start_dt, end_dt)].copy()
+if filt.empty:
+    st.warning("No data for selected filters.")
     st.stop()
 
 ###############################
-# 4. Helper funcs             #
+# 4. Helpers                  #
 ###############################
 
 def month_agg(df: pd.DataFrame, kpi: str) -> pd.DataFrame:
-    """Return month‑level aggregated df for one KPI."""
+    tmp = df[df["KPI"] == kpi]
     if agg_method == "Average":
-        m = df[df["KPI"] == kpi].groupby("Date")["Value"].mean().reset_index()
+        out = tmp.groupby("Date")["Value"].mean().reset_index()
     else:
-        m = df[df["KPI"] == kpi].groupby("Date")["Value"].sum().reset_index()
-    return m.sort_values("Date").reset_index(drop=True)
+        out = tmp.groupby("Date")["Value"].sum().reset_index()
+    return out.sort_values("Date")
 
-def latest_vals(mdf: pd.DataFrame):
-    valid = mdf.dropna(subset=["Value"])
-    latest = valid.iloc[-1]
+def latest_metrics(mdf: pd.DataFrame):
+    mdf = mdf.dropna(subset=["Value"])
+    latest = mdf.iloc[-1]
     latest_val = latest["Value"]
-    prev_val = valid.iloc[-2]["Value"] if len(valid) >= 2 else np.nan
-    mom = (latest_val - prev_val) / prev_val * 100 if np.isfinite(prev_val) and prev_val else np.nan
+    mom = np.nan
+    if len(mdf) >= 2:
+        prev = mdf.iloc[-2]["Value"]
+        mom = (latest_val - prev) / prev * 100 if prev else np.nan
+    yoy = np.nan
     try:
-        yoy_date = datetime.date(latest["Date"].year - 1, latest["Date"].month, 1)
-        yoy_val = valid.loc[valid["Date"] == yoy_date, "Value"].dropna().iloc[0]
+        tgt = datetime.date(latest["Date"].year - 1, latest["Date"].month, 1)
+        yoy_val = mdf.loc[mdf["Date"] == tgt, "Value"].iloc[0]
         yoy = (latest_val - yoy_val) / yoy_val * 100 if yoy_val else np.nan
     except Exception:
-        yoy = np.nan
+        pass
     return latest_val, mom, yoy
 
 ###############################
-# 5. KPI scorecard row        #
+# 5. Scorecard strip          #
 ###############################
 
-score_kpis = [
-    "net_revenue",
-    "total_appointments",
-    "total_clients",
-    "new_members",
-]
-
-st.markdown("### KPI Scorecards")
-card_cols = st.columns(len(score_kpis))
-
-for kpi, col in zip(score_kpis, card_cols):
-    if kpi not in all_kpis:
+score_kpis = ["net_revenue", "total_appointments", "total_clients", "new_members"]
+sc_cols = st.columns(len(score_kpis))
+for kpi, col in zip(score_kpis, sc_cols):
+    mdf = month_agg(filt, kpi)
+    if mdf.empty:
         continue
-    card_df = month_agg(flt_df, kpi)
-    latest, mom, _ = latest_vals(card_df)
-
+    val, mom, _ = latest_metrics(mdf)
+    delta_color = "#10b981" if mom >= 0 else "#ef4444"
     with col.container():
         st.markdown("<div class='kpi-card'>", unsafe_allow_html=True)
         st.markdown(f"<div class='kpi-title'>{kpi.replace('_',' ').title()}</div>", unsafe_allow_html=True)
-        st.markdown(f"<p class='big-metric'>{latest:,.0f}</p>", unsafe_allow_html=True)
-        delta_color = "#10b981" if mom >= 0 else "#ef4444"
-        st.markdown(
-            f"<span class='metric-delta' style='color:{delta_color}'>"
-            f"{mom:+.1f}% MoM</span>", unsafe_allow_html=True
-        )
+        st.markdown(f"<p class='kpi-val'>{val:,.0f}</p>", unsafe_allow_html=True)
+        st.markdown(f"<span class='kpi-delta' style='color:{delta_color}'>{mom:+.1f}% MoM</span>", unsafe_allow_html=True)
         spark = (
-            alt.Chart(card_df)
-            .mark_line(opacity=0.85, strokeWidth=2, color="#4ade80")
+            alt.Chart(mdf)
+            .mark_line(color="#4ade80", strokeWidth=2)
             .encode(x="Date:T", y="Value:Q")
             .properties(height=40)
         )
@@ -168,26 +147,35 @@ for kpi, col in zip(score_kpis, card_cols):
 
 st.divider()
 
-###############################
-# 6. Primary KPI section      #
-###############################
+################################
+# 6.  MULTI‑KPI OVERLAY CHART  #
+################################
 
-primary_df = month_agg(flt_df, primary_kpi)
-l_val, l_mom, l_yoy = latest_vals(primary_df)
+st.markdown(f"## {primary_kpi.replace('_',' ').title()} & Overlays")
+sel_kpis = [primary_kpi] + compare_kpis
+long_rows = []
+for k in sel_kpis:
+    mdf = month_agg(filt, k)
+    if normalize_toggle and not mdf.empty:
+        base_val = mdf.iloc[0]["Value"]
+        mdf["Value"] = mdf["Value"] / base_val * 100 if base_val else mdf["Value"]
+    mdf["KPI"] = k.replace("_", " ").title()
+    long_rows.append(mdf)
 
-st.markdown(f"## {primary_kpi.replace('_',' ').title()}")
-metric_cols = st.columns(3)
-metric_cols[0].metric("Latest", f"{l_val:,.2f}")
-metric_cols[1].metric("MoM", f"{l_mom:+.1f}%")
-metric_cols[2].metric("YoY", f"{l_yoy:+.1f}%" if np.isfinite(l_yoy) else "—")
+overlay_df = pd.concat(long_rows)
 
-# -- Line chart with tooltip & promo overlay
-base = (
-    alt.Chart(primary_df)
-    .encode(x="Date:T", y="Value:Q", tooltip=["Date:T", alt.Tooltip("Value:Q", format=",.0f")])
+color_scale = alt.Scale(scheme="category10")
+line_overlay = (
+    alt.Chart(overlay_df)
+    .mark_line(interpolate="monotone", strokeWidth=2)
+    .encode(
+        x="Date:T",
+        y="Value:Q",
+        color=alt.Color("KPI:N", scale=color_scale),
+        tooltip=["KPI", "Date:T", alt.Tooltip("Value:Q", format=",.0f")],
+    )
 )
-line = base.mark_line(interpolate="monotone", strokeWidth=2, color="#60a5fa")
-layer_list = [line]
+layer_list = [line_overlay]
 if promo_toggle:
     band = alt.Chart(pd.DataFrame({"start":[datetime.date(2023,8,1)],"end":[datetime.date(2023,8,31)]}))\
         .mark_rect(opacity=0.15, color="#8e44ad")\
@@ -196,32 +184,26 @@ if promo_toggle:
 
 st.altair_chart(alt.layer(*layer_list).interactive(bind_y=False), use_container_width=True)
 
-# -- MoM bar chart with gradient (green↔red)
+################################
+# 7. MoM bar for primary KPI   #
+################################
+
+primary_df = month_agg(filt, primary_kpi)
 if len(primary_df) > 1:
-    mom_df = primary_df.copy()
-    mom_df["MoM_%"] = mom_df["Value"].pct_change() * 100
-    mom_df = mom_df.dropna(subset=["MoM_%"])
-    cscale = alt.Scale(domain=[-40, 0, 40], range=["#ef4444", "#facc15", "#10b981"])
-    bar = (
-        alt.Chart(mom_df)
-        .mark_bar()
-        .encode(
-            x="Date:T",
-            y="MoM_%:Q",
-            color=alt.Color("MoM_%:Q", scale=cscale, legend=None),
-            tooltip=["Date:T", alt.Tooltip("MoM_%:Q", format="+.1f")],
-        )
-        .properties(height=140)
-    )
+    momdf = primary_df.assign(MoM_pct=primary_df["Value"].pct_change()*100).dropna()
+    bar_color = alt.Scale(domain=[-40,0,40], range=["#ef4444","#facc15","#10b981"])
+    bar = alt.Chart(momdf).mark_bar().encode(
+        x="Date:T", y="MoM_pct:Q", color=alt.Color("MoM_pct:Q", scale=bar_color, legend=None),
+        tooltip=["Date:T", alt.Tooltip("MoM_pct:Q", format="+.1f")]
+    ).properties(height=140)
     st.altair_chart(bar, use_container_width=True)
 
-###############################
-# 7. Raw data + download       #
-###############################
+################################
+# 8. Data + download           #
+################################
+with st.expander("📄 Raw data"):
+    st.dataframe(filt.sort_values(["Shop","Date"]).reset_index(drop=True), use_container_width=True)
 
-with st.expander("📄 Raw data"):
-    st.dataframe(flt_df.sort_values(["Shop", "Date"]).reset_index(drop=True), use_container_width=True)
+st.download_button("📥 Download CSV", data=filt.to_csv(index=False).encode(), file_name="filtered_kpi.csv")
 
-st.download_button("📥 Download CSV", data=flt_df.to_csv(index=False).encode("utf-8"), file_name="filtered_kpi.csv")
-
-st.caption("💈 Scissors & Scotch • Data thru Feb 2025 • v3.1")
+st.caption("💈 Scissors & Scotch • v3.2 • Data thru Feb 2025")
