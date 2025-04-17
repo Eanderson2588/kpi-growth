@@ -200,4 +200,35 @@ if promo_toggle:
         .encode(x="start:T", x2="end:T")
     layers.append(band)
 
-st.altair_chart(alt.layer(*layers).interactive(bind_y=False), use_container
+st.altair_chart(alt.layer(*layers).interactive(bind_y=False), use_container_width=True)
+
+################################
+# 7. MoM bar chart for primary #
+################################
+
+primary_df = month_agg(flt, primary_kpi)
+if len(primary_df) > 1:
+    momdf = primary_df.assign(MoM_pct=primary_df["Value"].pct_change()*100).dropna()
+    grad = alt.Scale(domain=[-40, 0, 40], range=["#ef4444", "#facc15", "#10b981"])
+    bar = (
+        alt.Chart(momdf)
+        .mark_bar()
+        .encode(
+            x="Date:T",
+            y="MoM_pct:Q",
+            color=alt.Color("MoM_pct:Q", scale=grad, legend=None),
+            tooltip=["Date:T", alt.Tooltip("MoM_pct:Q", format="+.1f")],
+        )
+        .properties(height=140)
+    )
+    st.altair_chart(bar, use_container_width=True)
+
+################################
+# 8. Raw table + download       #
+################################
+with st.expander("📄 Raw data"):
+    st.dataframe(flt.sort_values(["Shop", "Date"]).reset_index(drop=True), use_container_width=True)
+
+st.download_button("📥 Download CSV", data=filt.to_csv(index=False).encode(), file_name="filtered_kpi.csv")
+
+st.caption("💈 Scissors & Scotch • v3.3 • Data thru Feb 2025")
